@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "tianzheng-local": {
+      "command": "C:/path/to/python.exe",
+      "args": [
+        "-X",
+        "utf8",
+        "<repo>/bootstrap.py",
+        "serve"
+      ],
+      "cwd": "<repo>"
+    }
+  }
+}

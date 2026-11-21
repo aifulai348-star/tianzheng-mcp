@@ -1,0 +1,10 @@
+﻿.venv/
+.state/
+__pycache__/
+*.egg-info/
+outputs/
+tmp*/
+_tmp/
+pip-*
+*.pyc
+.pytest_cache/

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tianzheng-local-mcp"
+version = "1.0.0"
+description = "AutoCAD 2024 / T20 V9 command queue with context and ESC watchdog"
+requires-python = ">=3.12"
+dependencies = ["pywin32>=306; sys_platform == 'win32'", "mcp>=1.20,<2"]
+
+[project.scripts]
+tianzheng-mcp = "tz_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tz_mcp*"]

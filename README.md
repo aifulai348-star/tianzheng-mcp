@@ -1,13 +1,23 @@
-# 本机天正 MCP / CLI 1.0.0
+# 本机天正 MCP / CLI
 
 目标：AutoCAD 2024 (`AutoCAD.Application.24.3`) + `D:/天正` T20 建筑 V9。
 独立项目，不修改原 AutoCAD MCP。不要让两个服务同时编辑同一 CAD 实例。
+
+当前代码是 v1.0.0 基线加 2026-11-24 增量。MCP 固定 9 个工具：`system_diagnose`、`list_capabilities`、`queue_submit`、`queue_acknowledge`、`queue_status`、`queue_cancel`、`worker_start`、`worker_stop`、`worker_status`；21 个操作由 `queue_submit` 的 recipe 选择。
 
 当前 launch.cmd 与 MCP 配置调用原有 D:/python/python.exe，通过 bootstrap.py 只读加载现有 AutoCAD MCP 依赖。项目 venv 的 python.exe 带有 Low 完整性标签，已实测无法连接 Medium CAD，因此不作为真机入口。未修改安全标签或原有依赖环境；依赖目前共享。
 
 **2026-11-17 第一阶段真机验收通过：最终同一代码版本连续 10 轮、60 个操作步骤及 90 项验收检查通过。** 覆盖墙体创建、上下文引用、保存关闭重开、handle 与几何核对，正常完成没有 ESC 参与。详细结果见 `docs/` 下的验收记录；早期失败及修复过程保留在各批次记录中。
 
 **第二阶段实际 MCP 连续队列验收也已通过：30 个正常任务、180 个步骤，包含去重、冲突拒绝、排队取消、任务内失败停止后队列继续、上下文隔离、独占 worker 和退出检查。** 见 `docs/` 下的验收记录。真实模态、崩溃恢复、运行中取消、耐久与其他构件仍未验收，不能扩展为全部功能稳定的结论。
+
+## 2026-11-24 增量
+
+- `wall.split`：走 T20 屏幕菜单的 `TKATANA`，一个 recipe 形状覆盖两种宿主情况——门留在原墙，或迁到新段；接缝和对象数核对后，保存、关闭、分页 `document.list` 与两次 `document.readback` 都过，文件 hash 不变、没有文档残留。
+- `opening.move` / `column.move`：按 `document_id` + `handle` + 平面内非零 `delta` 移动；门沿宿主墙轴，矩形柱四个顶点同步位移；保存关闭后两次回读一致。跨轴、越墙端、重叠、非矩形/外来 handle、短位移这些拒绝路径目前只有离线测试。
+- `stair.rect_create`：真机建成 `TDbRectStair`。`width` 是单跑宽，向导只接受 (0,1230] mm：600/900/1200/1230 生效，1300/1500/3000 会被落回 1230。适配器现在回读比对，请求/实测不符就以 `unknown_outcome` 失败并点名已建句柄；实体可能已经留在图里，人工核对后走 `acknowledge`，不要盲目重放。
+- `wall.create`：交点处可以连续拆分段；返回的 `effects.additional_wall_handles` 记录新段，避免后续改错对象。
+- 本轮真机证据覆盖 19/21 个操作；`stair.create` 与 `roof.create` 仍未验证。`list_capabilities` 目前仍把 `document.save`、`document.reopen`、`entity.get`、`entity.verify`、`wall.find` 这 5 条留在 fallback，标签合并后会与下面的表一致。
 
 ## 运行
 
@@ -59,7 +69,7 @@
 原 COM 调用未返回时，不创建第二个执行线程；旧进程继续持有 OS 锁，防止重复执行。即使 ESC 后返回也不继续后面的步骤。使用 result 查看异常和已完成上下文；人工核对图纸并确认命令结束后：
 
 ```powershell
-.\launch.cmd acknowledge JOB_ID --side-effects "图里已有 1 根柱子，命令已结束"
+.\launch.cmd acknowledge JOB_ID --inspected --side-effects "图里已有 1 根柱子，命令已结束"
 .\launch.cmd worker start
 ```
 
@@ -70,25 +80,39 @@ acknowledge 只解除该任务的不确定性并标为 failed，**不重放原�
 
 ## 验证范围
 
-以下是当前（v1.0.0）的真实状态；每条都对应真机证据，没验过的就写没验过。
+以下是 2026-11-24 的真实状态；每条都对应真机证据，没验过的就写没验过。
 
-| 能力 | 状态 | 证据 |
+| 能力 | 状态 | 证据 / 边界 |
 |---|---|---|
-| `document.new` / `document.save` / `document.reopen` | 已验证 | 每个端到端任务都用，重开后句柄仍在 |
-| `wall.create` | 已验证 | MCP 全链路 4 面墙 35A–35D，几何与长度回读 |
-| `column.create` | 已验证 | `TGColumn` 面板逐字段键入 + 画布点选，DXF 回读宽/深/高/插入点 |
-| `opening.create` | 已验证，**仅 `普通门` 与 `普通窗`** | 同一任务门 3CF + 窗 409，洞面积 0→1.89→3.81，保存重开仍在（`docs/OPENING-WINDOW-20261120.md`） |
-| `polyline.create` / `annotation.text` / `slab.create` | 已验证 | 普通图元与 TSlab 板厚回读 |
-| `stair.create` / `stair.rect_create` / `roof.create` | **未验证** | 只有历史证据，没有真机验收；v1.1 处理 |
-| 其它门窗类型（防火门、弧窗、凸窗…） | **未验证** | 面板类型选择器未接 |
+| `document.new` | 已验证 | `Documents.Add` + `SaveAs`，文档数核对 |
+| `document.save` / `document.reopen` | 已验证（标签待合并） | 每个端到端任务都用；保存、关闭、重开后 handle 仍在 |
+| `document.close` | 已验证 | 只关 job 自有、活动、已保存图；同路径重开、外来文档、未保存文档均拒绝（拒绝路径离线测试） |
+| `document.readback` | 已验证 | 只读绝对路径已保存 DWG；1..100 个 handle；仅 ModelSpace；读完关闭，文件 hash 不变 |
+| `document.list` | 已验证 | 同 readback 的只读打开/校验/关闭路径；`limit` 1..100、`after_handle` 分页；仅 ModelSpace；实测 3 页 7 个实体 |
+| `entity.get` / `entity.verify` | 已验证（标签待合并） | 按 handle 读属性、校验 `ObjectName` |
+| `wall.create` | 已验证 | `TGWall` 面板 + 画布点选；MCP 全链路 4 面墙 35A–35D；交点可连续拆分段 |
+| `wall.find` | 已验证（标签待合并） | 点落在墙包围盒内且必须**唯一命中**；0 个或多个命中都拒绝 |
+| `wall.split` | 已验证 | 只接受本任务创建的原生墙 + 绝对 DWG 路径 + `document_id` + 墙 handle + Z=0 分割点；`TKATANA` 屏幕菜单；门留原墙/迁新段两种都过；接缝、对象数、保存关闭后的两次 readback 核对；超时/焦点丢失仅离线测试 |
+| `opening.create` | 已验证，**仅 `普通门` 与 `普通窗`** | 门 3CF 900×2100，洞面积 0→1.89；窗 409 1200×1600、sill 600，洞面积 1.89→3.81；`GetKind/GetSubKind`、DXF 宽高/插入点、洞面积增量核对；保存重开仍在 |
+| `opening.move` | 已验证 | `document_id` + `handle` + Z=0 非零 `delta`；沿宿主墙轴；DXF 插入、宽、高、旋转与 `HoleArea` 一致；实测 800；跨轴/越墙端/重叠/短位移拒绝仅离线测试；保存关闭后两次 readback，hash 不变 |
+| `column.create` | 已验证 | `TGColumn` 面板逐字段键入 + 画布点选；handle 35B；DXF 回读宽/深/高/插入点；点选前 OSMODE 置 0 |
+| `column.move` | 已验证 | `document_id` + `handle` + Z=0 非零 `delta`；独立矩形原生柱；四顶点同步位移，高度和 flags 不变；实测 500；非矩形/外来 handle/短位移拒绝仅离线测试 |
+| `slab.create` | 已验证 | `TSlab` 边界/洞多段线，板厚可回读（是否严格等于请求值本轮未判）；当前适配器只支持 Z=0 轴对齐矩形，最多一个严格位于边界内的洞 |
+| `stair.rect_create` | 已验证 | `TRStair` 平面点建 `TDbRectStair`；`height`/`steps`/`step_width`/`width` 保存关闭重开后回读；向导建双跑梯，`GetBoundingBox` 跨两跑，不等于单跑宽；`width` 单跑宽只支持 (0,1230] mm，600/900/1200/1230 生效，1300/1500/3000 落回 1230；请求/实测不符即 `unknown_outcome` 并点名已建句柄，实体可能已在图里，人工核对后 acknowledge，禁止盲目重放 |
+| `stair.create` | **未验证** | `TLStair` 只有历史证据，没有真机验收 |
+| `roof.create` | **未验证** | `TSlopeRoof` 边界消费没有真机验收 |
+| `annotation.text` / `polyline.create` | 已验证 | 普通 `AcDbText` / `AcDbPolyline`；文字单行不超过 160 字符；多段线 2..100 点、Z=0、至少两个不同点 |
 
-`list_capabilities` 的 `validation` 字段就是这张表的机器可读版本，调用方应以它为准，不要相信文档里的口头承诺。
+其它门窗类型（防火门、弧窗、凸窗…）仍未接；`opening.create` 的 `kind/subkind` 只接受 `普通门` 与 `普通窗`，且两者必须相同。
+
+`list_capabilities` 的 `validation` 字段是这张表的机器可读版本。当前它会报 14 条 `verified_live`，因为上面 5 条本轮已验证的标签还没合并；这是标签口径差，不是能力没验。合并后两边应一致；调用方以实际返回为准，不要相信文档里的口头承诺。
+
 Agent 已经能在只读 `list_capabilities` 的前提下自行规划出一个矩形房间（四面墙 + 柱 + 门 + 窗 + 保存 + 回读），
 见 `docs/AGENT-CLOSEDLOOP-20261120.md`。
 
 命令内部使用固定原生命令配方，部分旧适配器仍包含 AutoLISP 包装，不接受调用方任意代码；路径限制在项目根目录（默认 `D:/CAD绘图`，可用环境变量 `TZ_ROOT` 覆盖），拒绝覆盖已存在的工作图。任何创建后异常都归为未知结果，避免重试重复构件。
 
-2026-11-17 别墅回归排查：绘墙改为直接命令串，保留退出空输入；正交墙按目标位置识别，交墙拆分记录在 `effects.additional_wall_handles`，避免改错对象。原生命令在窗口最小化或纸空间时拒绝发送；绘墙前局部取景，避免本机天正的视图相关联接偏移。内部完成等待超时也会先持久化未知结果再定向ESC。坡屋顶改为原生命令提示下按确切边界handle选择，避免外层AutoLISP执行环境问题。最终同配方36步队列通过，重开后14墙、2梯、1坡顶，40项回归检查通过；这不代表别墅设计完整。门窗和轴线的参考实现、本机实测及未解决项（这两份记录未随仓库发布。）
+2026-11-17 别墅回归排查：绘墙改为直接命令串，保留退出空输入；正交墙按目标位置识别，交墙拆分记录在 `effects.additional_wall_handles`，避免改错对象。原生命令在窗口最小化或纸空间时拒绝发送；绘墙前局部取景，避免本机天正的视图相关联接偏移。内部完成等待超时也会先持久化未知结果再定向ESC。坡屋顶改为原生命令提示下按确切边界handle选择，避免外层AutoLISP执行环境问题（坡屋顶仍只有历史证据，见上表）。最终同配方36步队列通过，重开后14墙、2梯、1坡顶，40项回归检查通过；这不代表别墅设计完整。门窗和轴线的参考实现、本机实测及未解决项（这两份记录未随仓库发布。）
 
 ### 历史记录（保留，不要当现状读）
 
@@ -97,5 +121,7 @@ Agent 已经能在只读 `list_capabilities` 的前提下自行规划出一个�
 ## 测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+D:/python/python.exe -X utf8 -m unittest discover -s tests -v
 ```
+
+离线回归 211 项通过；测试不连接 CAD。

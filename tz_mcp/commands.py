@@ -18,10 +18,13 @@ SCHEMAS = {
     'entity.verify': ({'handles', 'object_name'}, {'document_id'}),
     'wall.create': ({'start', 'end'}, {'left_width', 'right_width'}),
     'wall.find': ({'point'}, set()),
+    'wall.split': ({'path', 'document_id', 'handle', 'point'}, set()),
     'opening.create': ({'host', 'point', 'kind', 'subkind'}, {'width', 'height', 'sill'}),
+    'opening.move': ({'document_id', 'handle', 'delta'}, set()),
     'stair.create': ({'point'}, {'height', 'steps', 'step_width', 'width'}),
     'stair.rect_create': ({'point','height','steps','step_width','width'}, {'rotation_deg'}),
     'column.create': ({'point','width','depth','height'}, set()),
+    'column.move': ({'document_id', 'handle', 'delta'}, set()),
     'slab.create': ({'boundary','thickness'}, {'holes'}),
     'annotation.text': ({'text','point','height'}, set()),
     'polyline.create': ({'points'}, {'closed'}),
@@ -46,11 +49,34 @@ def prepare(op, args):
     if not required <= args.keys() or args.keys() - required - optional:
         raise ValueError(f'{op}: requires {sorted(required)}, optional {sorted(optional)}')
     out = dict(args)
-    for key in ('point', 'start', 'end'):
+    for key in ('point', 'start', 'end', 'delta'):
         if key in out:
             out[key] = point(out[key])
     if op == 'wall.create' and out['start'] == out['end']:
         raise ValueError('Wall must have nonzero length')
+    if op in ('opening.move', 'column.move'):
+        if not isinstance(out['document_id'], str) or not out['document_id'].strip():
+            raise ValueError('Move document_id must be a non-empty string')
+        handle = out['handle']
+        if not isinstance(handle, str) or not re.fullmatch(r'[0-9A-Fa-f]+', handle):
+            raise ValueError('Move handle must be a hexadecimal handle without 0x prefix')
+        if out['delta'][2] != 0:
+            raise ValueError('Move delta must lie in the plan (Z=0)')
+        if abs(out['delta'][0]) <= 1e-6 and abs(out['delta'][1]) <= 1e-6:
+            raise ValueError('Move delta must be nonzero')
+    if op == 'wall.split':
+        if not isinstance(out['path'], str) or not out['path'].strip():
+            raise ValueError('Split path must be a non-empty string')
+        candidate = Path(out['path'])
+        if not candidate.is_absolute() or candidate.suffix.lower() != '.dwg':
+            raise ValueError('Split path must be an absolute DWG path')
+        if not isinstance(out['document_id'], str) or not out['document_id'].strip():
+            raise ValueError('Split document_id must be a non-empty string')
+        handle = out['handle']
+        if not isinstance(handle, str) or not re.fullmatch(r'[0-9A-Fa-f]+', handle):
+            raise ValueError('Split handle must be a hexadecimal handle without 0x prefix')
+        if out['point'][2] != 0:
+            raise ValueError('Split point must lie in the plan (Z=0)')
     if op == 'document.readback':
         if not isinstance(out['path'], str) or not out['path'].strip():
             raise ValueError('Readback path must be a non-empty string')

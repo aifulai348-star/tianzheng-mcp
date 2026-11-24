@@ -45,4 +45,129 @@ class PartsTests(unittest.TestCase):
         self.assertEqual(18,prepare('stair.rect_create',args)['steps'])
         with self.assertRaises(ValueError):prepare('stair.rect_create',dict(args,steps=18.5))
 
+    def test_unframed_part_fails_without_becoming_uncertain(self):
+        from tz_mcp.cad import CommandNotSent, OutcomeUnknown
+        from tz_mcp.parts import execute_part
+        class Doc:
+            def GetVariable(self,name):return {'TILEMODE':1,'CVPORT':1}[name]
+        class Cad:
+            hwnd=1;doc=Doc();document_id='doc'
+            def __init__(self,error):self.error=error
+            def guard(self):pass
+            def entities(self):return {}
+            def frame_wall(self,args):raise self.error
+            def run_command(self,payload):raise AssertionError('command must not be sent')
+        args={'point':[1000,4900],'height':3000,'steps':18,'step_width':260,'width':1200,'rotation_deg':90}
+        with patch('tz_mcp.parts.require_drawing_window'), patch('tz_mcp.parts.require_model_space'):
+            with self.assertRaises(CommandNotSent):
+                execute_part(Cad(CommandNotSent('framing refused')),'stair.rect_create',args)
+            with self.assertRaises(OutcomeUnknown):
+                execute_part(Cad(RuntimeError('unexpected')),'stair.rect_create',args)
+
+class _FakeStair:
+    """Stand-in for the wizard-built TDbRectStair used by the width regression.
+
+    Only the properties stair.rect_create touches are modelled: the wizard
+    builds the stair at 1230 mm, refuses writes to StairWidth/StairWidth2, or
+    silently clamps them, depending on what the test needs to reproduce.
+    """
+    ObjectName='TDbRectStair';Handle='34D'
+    def __init__(self,clamp=None,refuse=()):
+        object.__setattr__(self,'_values',{'StairHeight':3000.0,'StepTotalNum':18.0,'StepWidth':270.0,
+                                           'StairWidth':1230.0,'StairWidth2':1230.0})
+        object.__setattr__(self,'refuse',set(refuse));object.__setattr__(self,'clamp',clamp)
+        object.__setattr__(self,'calls',{'rotate':0,'move':0,'update':0})
+        object.__setattr__(self,'bounds',[[0.0,0.0,0.0],[2560.0,3340.0,3000.0]])
+    def __getattr__(self,name):
+        values=object.__getattribute__(self,'_values')
+        if name in values:return values[name]
+        raise AttributeError(name)
+    def __setattr__(self,name,value):
+        values=object.__getattribute__(self,'_values')
+        if name in values:
+            if name in object.__getattribute__(self,'refuse'):
+                raise RuntimeError(f"Property '<unknown>.{name}' can not be set.")
+            clamp=object.__getattribute__(self,'clamp')
+            if clamp is not None and name in ('StairWidth','StairWidth2') and float(value)>clamp:
+                value=clamp
+            values[name]=float(value)
+            return
+        object.__setattr__(self,name,value)
+    def Rotate(self,base,angle):self.calls['rotate']+=1
+    def Move(self,lo,point):
+        self.calls['move']+=1
+        lo=list(getattr(lo,'value',lo));point=list(getattr(point,'value',point))
+        dx=point[0]-lo[0];dy=point[1]-lo[1]
+        object.__setattr__(self,'bounds',[[b[0]+dx,b[1]+dy,b[2]] for b in self.bounds])
+    def Update(self):self.calls['update']+=1
+
+class _FakeCad:
+    hwnd=1;document_id='doc'
+    def __init__(self,stair):
+        self.stair=stair;self.commands=[];self.seen=False;self.doc=object()
+    def guard(self):pass
+    def frame_wall(self,args):pass
+    def run_command(self,payload):self.commands.append(payload);self.seen=True
+    def entities(self):return {self.stair.Handle:self.stair} if self.seen else {}
+    def describe(self,e):return {'handle':e.Handle,'object_name':'TDbRectStair','bounds':e.bounds}
+
+def run_stair_case(stair,args):
+    from tz_mcp.parts import execute_part
+    cad=_FakeCad(stair)
+    with patch('tz_mcp.parts.require_drawing_window'),patch('tz_mcp.parts.require_model_space'):
+        return cad,execute_part(cad,'stair.rect_create',args)
+
+class StairWidthRegressionTests(unittest.TestCase):
+    args={'point':[13400,8300],'height':3000,'steps':16,'step_width':280,'width':1500,'rotation_deg':90}
+    def test_wizard_refused_flight_width_is_uncertain_and_names_the_side_effect(self):
+        from tz_mcp.cad import OutcomeUnknown
+        stair=_FakeStair(refuse=('StairWidth','StairWidth2'))
+        with self.assertRaises(OutcomeUnknown) as ctx:
+            run_stair_case(stair,self.args)
+        message=str(ctx.exception)
+        for token in ('StairWidth','1500','1230','34D','remains in the drawing','side effect present','can not be set'):
+            self.assertIn(token,message)
+        self.assertTrue(ctx.exception.uncertain)
+    def test_refused_width_still_reports_the_build_as_a_side_effect(self):
+        from tz_mcp.cad import OutcomeUnknown
+        stair=_FakeStair(refuse=('StairWidth','StairWidth2'))
+        with self.assertRaises(OutcomeUnknown):
+            run_stair_case(stair,self.args)
+        cad=_FakeCad(stair)
+        with self.assertRaises(OutcomeUnknown):
+            with patch('tz_mcp.parts.require_drawing_window'),patch('tz_mcp.parts.require_model_space'):
+                from tz_mcp.parts import execute_part
+                execute_part(cad,'stair.rect_create',self.args)
+        self.assertEqual(1,len(cad.commands))
+        self.assertEqual('TRStair\n13400,8300\n\n',cad.commands[0])
+        self.assertEqual(0,stair.calls['rotate'])
+        self.assertEqual(0,stair.calls['move'])
+    def test_silently_clamped_width_is_not_a_property_pass(self):
+        from tz_mcp.cad import OutcomeUnknown
+        stair=_FakeStair(clamp=1230)
+        with self.assertRaises(OutcomeUnknown) as ctx:
+            run_stair_case(stair,self.args)
+        message=str(ctx.exception)
+        self.assertIn('measured 1230',message)
+        self.assertNotIn('write refused',message)
+        self.assertTrue(ctx.exception.uncertain)
+    def test_width_that_matches_the_wizard_value_still_passes(self):
+        stair=_FakeStair(refuse=('StairWidth','StairWidth2'))
+        result=run_stair_case(stair,dict(self.args,width=1230,steps=18))[1]
+        self.assertTrue(result['validation']['properties'])
+        self.assertEqual(['StairWidth','StairWidth2'],result['evidence']['properties_wizard_owned'])
+        self.assertEqual(1230.0,result['evidence']['properties_measured']['StairWidth'])
+        self.assertEqual(1,stair.calls['rotate']);self.assertEqual(1,stair.calls['move'])
+    def test_property_pass_records_requested_default_and_measured_widths(self):
+        stair=_FakeStair()
+        cad,result=run_stair_case(stair,{'point':[0,3500],'height':3000,'steps':18,'step_width':260,
+                                         'width':1200,'rotation_deg':0})
+        evidence=result['evidence']
+        self.assertTrue(result['validation']['properties'])
+        self.assertEqual(1200.0,evidence['properties_requested']['StairWidth'])
+        self.assertEqual(1200.0,evidence['properties_measured']['StairWidth2'])
+        self.assertEqual(1230.0,evidence['properties_wizard_default']['StairWidth'])
+        self.assertEqual([],evidence['properties_wizard_owned'])
+        self.assertEqual(1200.0,evidence['stair_width'])
+
 if __name__=='__main__':unittest.main()

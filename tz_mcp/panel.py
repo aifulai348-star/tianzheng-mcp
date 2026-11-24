@@ -11,6 +11,7 @@ Live evidence (2026-11-19, T20 V9 / AutoCAD 2024, docs/LIVE-PROBE-20261118.md):
 - ESC closes the panel and returns the command line to idle.
 """
 import ctypes
+import re
 import time
 from ctypes import wintypes as W
 from pathlib import Path
@@ -199,9 +200,22 @@ def create_column(c, args, backend=None, timeout=15.0):
     # fails or the panel never shows up.
     old_osmode = int(float(retry_document_read(lambda: c.doc.GetVariable('OSMODE'))))
     c.run_command('(setvar "OSMODE" 0)\n')
+    # Smooth view transitions animate a reframe over about a second while
+    # VIEWCTR/VIEWSIZE already report the target. A pick issued during that
+    # animation is transformed with the outgoing view, so a framed column lands
+    # on the previous view centre (measured 2026-11-21, column c2 landed at
+    # (16000,13000) instead of (16000,10400) with VTENABLE=3).
+    old_vtenable = int(float(retry_document_read(lambda: c.doc.GetVariable('VTENABLE'))))
+    if old_vtenable:
+        c.run_command('(setvar "VTENABLE" 0)\n')
     try:
         return _place_column(c, args, backend, timeout)
     finally:
+        if old_vtenable:
+            try:
+                c.run_command('(setvar "VTENABLE" %d)\n' % old_vtenable)
+            except Exception:
+                pass
         try:
             c.run_command('(setvar "OSMODE" %d)\n' % old_osmode)
         except Exception:
@@ -230,6 +244,20 @@ def _place_column(c, args, backend, timeout):
     centre = retry_document_read(lambda: tuple(c.doc.GetVariable('VIEWCTR')))
     view_size = float(retry_document_read(lambda: c.doc.GetVariable('VIEWSIZE')))
     view_rect = viewport(u, c.hwnd, c.pid)
+    # The panel blocks COM once it is open, so a point outside the view cannot
+    # be reframed afterwards. Callers keep the whole plan in view before the
+    # column phase (parts.execute_part), which makes this branch a last resort:
+    # a reframe issued here is not always effective for the very next pick.
+    frame = getattr(c, 'frame_wall', None)
+    if frame is not None:
+        try:
+            world_to_screen((centre[0], centre[1]), view_size, view_rect, args['point'])
+        except PanelTimeout:
+            frame({'start': args['point'], 'end': args['point']})
+            time.sleep(0.3)
+            centre = retry_document_read(lambda: tuple(c.doc.GetVariable('VIEWCTR')))
+            view_size = float(retry_document_read(lambda: c.doc.GetVariable('VIEWSIZE')))
+            world_to_screen((centre[0], centre[1]), view_size, view_rect, args['point'])
     # The panel is one modeless dialog that tianzheng shows again on the next
     # command; it is not created fresh per invocation. Waiting for a handle
     # that was absent before therefore times out as soon as a previous attempt
@@ -609,7 +637,16 @@ def verify_opening_dxf(dxf, args, placement, host_handle, tolerance=0.5):
     if dxf['insertion'] is None:
         raise OutcomeUnknown('Opening DXF insertion point is missing')
     pick_tolerance = max(1.0, 2.0 * float(placement.get('scale') or 0.0))
-    if any(abs(dxf['insertion'][i] - placement['world'][i]) > pick_tolerance for i in (0, 1)):
+    requested = args.get('point')
+
+    def close_to(target, tol):
+        return all(abs(dxf['insertion'][i] - target[i]) <= tol for i in (0, 1))
+
+    # Tianzheng snaps an opening onto the wall centreline, so a click that lands a
+    # little off the line still inserts at the requested centre. Accept either the
+    # exact requested centre or the clicked point within the pixel tolerance.
+    if not (close_to(placement['world'], pick_tolerance)
+            or (requested is not None and close_to(requested, max(2.0, tolerance)))):
         raise OutcomeUnknown('Opening insertion differs from the clicked point: %r vs %r'
                              % (dxf['insertion'], placement['world']))
     if dxf['host'] is None or int(dxf['host'], 16) != int(str(host_handle), 16):
@@ -618,3 +655,173 @@ def verify_opening_dxf(dxf, args, placement, host_handle, tolerance=0.5):
     return {'type': dxf['type'], 'layer': dxf['layer'], 'width': dxf['width'],
             'height': dxf['height'], 'rotation': dxf['rotation'],
             'insertion': list(dxf['insertion']), 'host': dxf['host']}
+
+
+def drawing_view(c):
+    """Capture the drawing-area mapping while the command line is still idle."""
+    from .cad import retry_document_read
+    centre = retry_document_read(
+        lambda: tuple(float(v) for v in c.doc.GetVariable('VIEWCTR')[:2]))
+    size = retry_document_read(lambda: float(c.doc.GetVariable('VIEWSIZE')))
+    return centre, size, viewport(_u(), c.hwnd, c.pid)
+
+
+def _menu_buttons(u, root):
+    """Visible buttons under root as (hwnd, text with whitespace removed)."""
+    out = []
+    for h in children(u, root):
+        if not visible(u, h) or 'Button' not in class_name(u, h):
+            continue
+        text = re.sub(r'\s+', '', text_of(u, h))
+        if text:
+            out.append((h, text))
+    return out
+
+
+def _type_wall_split_command(c, command, backend=None):
+    """Fallback when the T20 screen menu is collapsed/auto-hidden."""
+    from .input_bridge import NativeInput
+    backend = backend or NativeInput()
+    backend.activate_view(c.pid, c.hwnd)
+    backend.esc(1)
+    time.sleep(0.2)
+    for ch in command:
+        backend.unicode(ch)
+    backend.enter()
+    time.sleep(0.8)
+    return ['command:' + command]
+
+
+def menu_dispatch(c, labels, timeout=3.0, backend=None):
+    """Click a T20 screen-menu path by button title, using window messages only.
+
+    The native split command exists in the T20 screen menu (`墙体 -> 墙体切割`),
+    and also responds to typing `TKATANA` directly into the foreground drawing
+    view when the T20 screen menu is collapsed or auto-hidden.
+    """
+    u = _u()
+    fallback = 'TKATANA' if tuple(labels) == ('墙体', '墙体切割') else None
+    bars = [h for h in children(u, c.hwnd)
+            if class_name(u, h).startswith('AfxControlBar') and visible(u, h)
+            and 'T20' in title(u, h)]
+    if len(bars) != 1:
+        if fallback is not None:
+            return _type_wall_split_command(c, fallback, backend=backend)
+        raise PanelTimeout('T20 screen menu bar not found (found %d)' % len(bars))
+
+    def find(root, text):
+        for h, label in _menu_buttons(u, root):
+            if label == text:
+                return h
+        return None
+
+    def find_top(root, text):
+        buttons = _menu_buttons(u, root)
+        for h, label in buttons:
+            if label == text:
+                return h
+        for h, label in buttons:
+            if label.startswith(text):
+                return h
+        for h, label in buttons:
+            if label.endswith(text) and len(label) <= len(text) + 2:
+                return h
+        return None
+
+    target = re.sub(r'\s+', '', labels[-1])
+    clicked = []
+    item = find(c.hwnd, target)
+    if item is None:
+        top = re.sub(r'\s+', '', labels[0])
+        match = find_top(bars[0], top) or find_top(c.hwnd, top)
+        if match is None:
+            if fallback is not None:
+                return _type_wall_split_command(c, fallback, backend=backend)
+            seen = [label for _, label in _menu_buttons(u, c.hwnd)][:20]
+            raise PanelTimeout('T20 menu item not found: %s (visible buttons: %r)' % (labels[0], seen))
+        u.SendMessageW(W.HWND(match), 0x00F5, 0, 0)  # BM_CLICK
+        clicked.append(int(match))
+        time.sleep(0.8)
+        item = _wait(lambda: find(c.hwnd, target), timeout, interval=0.2)
+    if item is None:
+        if fallback is not None:
+            return _type_wall_split_command(c, fallback, backend=backend)
+        seen = [label for _, label in _menu_buttons(u, c.hwnd)][:20]
+        raise PanelTimeout('T20 menu item not found: %s (visible buttons: %r)' % (labels[-1], seen))
+    u.SendMessageW(W.HWND(item), 0x00F5, 0, 0)
+    clicked.append(int(item))
+    time.sleep(0.8)
+    return clicked
+
+
+def pick_world_point(c, centre, view_size, view_rect, point, backend=None, timeout=2.0):
+    """One real click at a world point, only when AutoCAD is truly foreground."""
+    from .input_bridge import NativeInput
+    backend = backend or NativeInput()
+    x, y = world_to_screen(centre, view_size, view_rect, point)
+    screen = (int(round(x)), int(round(y)))
+    u = _u()
+    backend.activate_view(c.pid, c.hwnd)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if int(u.GetForegroundWindow()) == int(c.hwnd):
+            break
+        time.sleep(0.05)
+    else:
+        raise PanelTimeout('AutoCAD is not the foreground window; pick not sent')
+    backend.click(screen[0], screen[1])
+    return {'screen': list(screen), 'world': list(point)}
+
+
+def wait_command_idle(c, timeout=10.0):
+    """Poll CMDACTIVE only; never send command text while a pick is pending."""
+    from .cad import CommandCompletionTimeout
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if int(float(c.doc.GetVariable('CMDACTIVE'))) == 0:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    raise CommandCompletionTimeout('Wall split command did not confirm completion')
+
+
+def entity_wall_hosts(c, handle, folder=None, timeout=8.0):
+    """Read the DXF 330 references of one entity as (handle, type) rows.
+
+    A reference the dump cannot resolve is kept as an UNPARSEABLE row instead
+    of being dropped: silently filtering it would let a half-read list look
+    unique and pass the host check.
+    """
+    from .cad import OutcomeUnknown
+    folder = Path(folder) if folder is not None else Path(__file__).resolve().parent.parent / '_tmp'
+    folder.mkdir(parents=True, exist_ok=True)
+    out = folder / ('hosts-%s.txt' % handle)
+    if out.exists():
+        out.unlink()
+    lisp = ('(progn (setq f (open "%s" "w")) (setq e (handent "%s")) '
+            '(if e (foreach p (entget e) (if (= (car p) 330) '
+            '(progn (setq r (cdr p)) (if (and (= (type r) (quote ENAME)) (entget r)) '
+            '(princ (strcat (cdr (assoc 5 (entget r))) " " (cdr (assoc 0 (entget r))) "\\n") f) '
+            '(princ "? UNRESOLVED\\n" f))))) '
+            '(princ "? MISSING\\n" f)) (close f) (princ))') % (out.as_posix(), handle)
+    c.run_command(lisp + '\n')
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not out.exists():
+        time.sleep(0.1)
+    if not out.exists():
+        raise OutcomeUnknown('Wall-host DXF dump did not appear: ' + str(out))
+    refs = []
+    for line in out.read_text(encoding='gbk', errors='replace').splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        parts = text.split()
+        if len(parts) == 2 and all(ch in '0123456789abcdefABCDEF' for ch in parts[0]):
+            refs.append({'handle': parts[0].upper(), 'type': parts[1]})
+        else:
+            refs.append({'handle': None, 'type': 'UNPARSEABLE', 'raw': text})
+    if not refs:
+        raise OutcomeUnknown('Entity %s has no readable DXF 330 references' % handle)
+    return refs

@@ -47,16 +47,41 @@ VALIDATION = {
                       'present after save+reopen): TGDOOR or TGWINDOW palette, three size rows '
                       'typed by order, then one canvas click; kind/width/height read back from COM '
                       'and DXF. See docs/OPENING-WINDOW-20261120.md',
+    'opening.move': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD 2024 '
+                    '+ T20): a door moved along its host wall in plan; DXF insertion, width, height '
+                    'and rotation plus the host HoleArea read back consistently; cross-axis, '
+                    'off-wall-end and overlap refusals and short-delta protection are '
+                    'offline-tested only; read back twice after save+close with an unchanged file '
+                    'hash',
     'slab.create': 'verified_live: TSlab consumes boundary/hole polylines, thickness read back',
     'annotation.text': 'verified_live: ordinary AcDbText',
     'polyline.create': 'verified_live: ordinary AcDbPolyline',
+    'wall.split': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD 2024 + '
+                  'T20): TKATANA via the T20 screen menu, both host cases through one recipe shape '
+                  '-- the door stays on the original wall or migrates to the new segment, seam and '
+                  'object counts verified, paged document.list and two document.readback passes '
+                  'after save+close with unchanged hash and no document left open; '
+                  'timeout/focus-loss paths remain offline-tested only',
     'column.create': 'verified_live (2026-11-19 end-to-end through MCP + worker, handle 35B): '
                      'TGColumn panel edited field by field then one canvas click; '
                      'width/depth/height/insertion read back from DXF; OSMODE forced to 0 for the '
                      'click. Seed CopyObjects route (job 144ad30f) removed. Live runs drove the UI '
                      'directly because COM only reaches the first AutoCAD instance',
+    'column.move': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD 2024 '
+                   '+ T20): a standalone rectangular column moved in plan; DXF insertion and all '
+                   'four vertices shifted by the same delta, height and flags unchanged; '
+                   'non-rectangular/foreign handle and short-delta refusals are offline-tested '
+                   'only; read back twice after save+close with an unchanged file hash',
     'stair.create': 'unverified: TLStair payload is historical evidence only',
-    'stair.rect_create': 'unverified: TRStair payload is historical evidence only',
+    'stair.rect_create': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD '
+                         '2024 + T20): TDbRectStair created from a plan point with height, step '
+                         'count and width read back after save+close+reopen; the wizard builds a '
+                         'two-flight stair, so GetBoundingBox spans both flights and is not the '
+                         'requested single-flight width. Flight width is only honoured up to the '
+                         '1230 mm wizard default: 600/900/1200/1230 passed, 1300/1500/3000 stayed '
+                         'at 1230. A requested/measured mismatch now fails the job as '
+                         'unknown_outcome naming the built handle instead of passing the '
+                         'properties',
     'roof.create': 'unverified: TSlopeRoof boundary consumption not live-verified',
 }
 

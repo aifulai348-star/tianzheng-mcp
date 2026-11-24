@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from pathlib import Path
-from tz_mcp.cad import Cad, OutcomeUnknown, guarded_mutation, retry_busy, retry_document_read, com_method, invoke_document, check_application, require_drawing_window, select_wall, require_model_space
+from tz_mcp.cad import Cad, CommandNotSent, OutcomeUnknown, guarded_mutation, retry_busy, retry_document_read, com_method, invoke_document, property_lookup, property_read, check_application, require_drawing_window, select_wall, select_wall_segments, require_model_space
 
 
 class CadSafetyTests(unittest.TestCase):
@@ -21,6 +21,86 @@ class CadSafetyTests(unittest.TestCase):
         cad.frame_wall({'start':[6590,4800,0],'end':[9760,4800,0]})
         self.assertEqual([6090,4300,0],list(cad.app.lo))
         self.assertEqual([10260,5300,0],list(cad.app.hi))
+    def test_frame_wall_retries_member_lookup_refused_after_document_change(self):
+        # Measured 2026-11-24: right after Documents.Add/SaveAs the DumbDispatch
+        # wrapper reports a rejected lookup as AttributeError <unknown>.ZoomWindow,
+        # so the member must be resolved again instead of believed once.
+        class App:
+            lookups=0
+            def __getattr__(self,name):
+                if name!='ZoomWindow':raise AttributeError(name)
+                App.lookups+=1
+                if App.lookups<3:raise AttributeError('<unknown>.ZoomWindow')
+                def zoom(lo,hi):
+                    self.lo,self.hi=lo.value,hi.value
+                return zoom
+        App.lookups=0
+        cad=Cad.__new__(Cad);cad.app=App()
+        cad.frame_wall({'start':[0,0,0],'end':[1000,0,0]})
+        self.assertEqual(3,App.lookups)
+        self.assertEqual([-500,-500,0],list(cad.app.lo))
+        self.assertEqual([1500,500,0],list(cad.app.hi))
+    def test_frame_wall_reports_failure_not_uncertain_when_view_is_never_reached(self):
+        class App:
+            def __getattr__(self,name):raise AttributeError('<unknown>.'+name)
+        cad=Cad.__new__(Cad);cad.app=App()
+        with patch('tz_mcp.cad.FRAME_TIMEOUT',0.05):
+            with self.assertRaises(CommandNotSent) as caught:
+                cad.frame_wall({'start':[0,0,0],'end':[1000,0,0]})
+        self.assertIn('before any command was sent',str(caught.exception))
+        self.assertFalse(getattr(caught.exception,'uncertain',False))
+        self.assertFalse(issubclass(CommandNotSent,OutcomeUnknown))
+    def test_property_read_waits_out_a_refused_lookup_instead_of_dropping_the_value(self):
+        # Measured 2026-11-24: two readbacks of one saved wall disagreed because
+        # a refused GetIDsOfNames had been swallowed as "no such property"
+        # (HoleArea '1.89' in one read, absent in the next). A refusal must be
+        # waited out; only a name the object kind does not own is absent.
+        class Refused(Exception):
+            hresult = -2147418111
+        calls = {'reads': 0, 'lookups': 0}
+
+        class Ole:
+            def GetIDsOfNames(self, name):
+                calls['lookups'] += 1
+                if calls['lookups'] <= 2:
+                    raise Refused('call rejected')
+                return 0
+
+        class Entity:
+            def __init__(self):
+                self._oleobj_ = Ole()
+            def __getattr__(self, name):
+                if name != 'HoleArea':
+                    raise AttributeError(name)
+                calls['reads'] += 1
+                if calls['reads'] < 3:
+                    raise AttributeError('<unknown>.HoleArea')
+                return '1.89'
+
+        self.assertEqual('1.89', property_read(Entity(), 'HoleArea'))
+        self.assertEqual(3, calls['reads'])
+        self.assertEqual(2, calls['lookups'])
+
+    def test_property_read_reports_absent_property_without_waiting(self):
+        class Absent(Exception):
+            hresult = -2147352570
+        calls = {'reads': 0}
+
+        class Ole:
+            def GetIDsOfNames(self, name):
+                raise Absent('unknown name')
+
+        class Entity:
+            def __init__(self):
+                self._oleobj_ = Ole()
+            def __getattr__(self, name):
+                calls['reads'] += 1
+                raise AttributeError('<unknown>.' + name)
+
+        with self.assertRaises(AttributeError):
+            property_read(Entity(), 'StairHeight')
+        self.assertEqual(1, calls['reads'])
+
     def test_selects_requested_wall_without_modifying_intersection_fragments(self):
         candidates = [dict(handle='split',bounds=[[120,7760,0],[6500,8000,3000]],LeftWidth=120,RightWidth=120),
                       dict(handle='new',bounds=[[6450,240,0],[6550,7880,3000]],LeftWidth=50,RightWidth=50)]
@@ -36,6 +116,16 @@ class CadSafetyTests(unittest.TestCase):
             select_wall([short],{'start':[0,0,0],'end':[1000,0,0]},120)
         wall=dict(handle='short',bounds=[[-120,0,0],[120,100,3000]],LeftWidth=120,RightWidth=120)
         self.assertEqual('short',select_wall([wall],{'start':[0,0,0],'end':[0,100,0]},0)['handle'])
+    def test_select_wall_segments_chains_split_pieces_and_rejects_gaps(self):
+        seg1 = dict(handle='seg1', bounds=[[-120, -120, 0], [3000, 120, 3000]], LeftWidth=120, RightWidth=120)
+        seg2 = dict(handle='seg2', bounds=[[3000, -120, 0], [8120, 120, 3000]], LeftWidth=120, RightWidth=120)
+        other = dict(handle='other', bounds=[[0, 1880, 0], [8000, 2120, 3000]], LeftWidth=120, RightWidth=120)
+        args = {'start': [0, 0, 0], 'end': [8000, 0, 0]}
+        chosen = select_wall_segments([seg2, other, seg1], args, [120, 120])
+        self.assertEqual(['seg1', 'seg2'], [item['handle'] for item in chosen])
+        gapped = dict(handle='seg2_gap', bounds=[[3500, -120, 0], [8120, 120, 3000]], LeftWidth=120, RightWidth=120)
+        with self.assertRaises(OutcomeUnknown):
+            select_wall_segments([seg1, gapped], args, [120, 120])
     def test_minimized_drawing_window_is_rejected_before_native_mutation(self):
         with self.assertRaisesRegex(ValueError, 'minimized'):
             require_drawing_window(100, is_iconic=lambda hwnd: True)

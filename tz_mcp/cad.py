@@ -17,6 +17,10 @@ ROOT = Path(os.environ.get('TZ_ROOT', 'D:/CAD绘图'))
 # saved test artefacts of this project may be reopened read-only. Keeping the
 # root as a module constant lets tests redirect it without touching production.
 OUTPUTS = Path(os.environ.get('TZ_OUTPUTS', 'D:/CAD绘图/tianzheng-mcp/outputs'))
+# AutoCAD rejects COM calls for a moment while a drawing is created, saved or
+# regenerated. View framing happens before any command is sent, so it may wait
+# this long for the application to accept the call again.
+FRAME_TIMEOUT = 20.0
 _OWN_DOCUMENT = object()
 
 
@@ -46,6 +50,15 @@ class OutcomeUnknown(RuntimeError):
 
 class CommandCompletionTimeout(OutcomeUnknown):
     command_completion_timeout = True
+
+
+class CommandNotSent(RuntimeError):
+    """The job stopped before anything was handed to AutoCAD.
+
+    A refused view change or an unreachable member leaves the drawing exactly
+    as it was, so this is a plain failure: no human inspection is required and
+    replaying the job is safe. It must never be reported as unknown_outcome.
+    """
 
 
 def select_wall(candidates, args, join_tolerance):
@@ -83,13 +96,62 @@ def select_wall(candidates, args, join_tolerance):
     return matches[0]
 
 
+def select_wall_segments(candidates, args, join_tolerance):
+    """Identify the created wall as one segment or as a contiguous chain of split pieces.
+
+    Tianzheng splits a newly drawn wall at every wall it crosses, so one command can leave
+    two or more collinear pieces whose union is exactly the requested span. A single-span
+    match is preferred; the chain is accepted only when the pieces tile [low, high] without
+    a gap, so unrelated fragments still raise.
+    """
+    try:
+        return [select_wall(candidates, args, join_tolerance)]
+    except OutcomeUnknown as single_error:
+        start, end = args['start'], args['end']
+        dx, dy = end[0]-start[0], end[1]-start[1]
+        if abs(dx) > 1e-6 and abs(dy) > 1e-6:
+            raise
+        axis = 0 if abs(dx) > 1e-6 else 1
+        normal = 1-axis
+        positive = end[axis] > start[axis]
+        lower_width = 'RightWidth' if (axis == 0 and positive) or (axis == 1 and not positive) else 'LeftWidth'
+        low, high = sorted((start[axis], end[axis]))
+        tolerances = (join_tolerance, join_tolerance) if isinstance(join_tolerance, (int, float)) else join_tolerance
+        pieces = []
+        for info in candidates:
+            if 'bounds' not in info or not {'LeftWidth', 'RightWidth'} <= info.keys():
+                continue
+            lo, hi = info['bounds']
+            if abs(lo[normal] + info[lower_width] - start[normal]) > 0.01:
+                continue
+            if abs(hi[normal]-lo[normal]-info['LeftWidth']-info['RightWidth']) > 0.01:
+                continue
+            if lo[axis] < low - tolerances[0] - 0.01 or hi[axis] > high + tolerances[1] + 0.01:
+                continue
+            pieces.append(info)
+        pieces.sort(key=lambda info: info['bounds'][0][axis])
+        chain, cursor = [], low
+        for info in pieces:
+            if info['bounds'][0][axis] <= cursor + 2.0:
+                chain.append(info)
+                cursor = max(cursor, info['bounds'][1][axis])
+                if cursor >= high - 0.01:
+                    return chain
+        raise single_error
+
+
+# AutoCAD refuses COM calls while it opens, saves or regenerates a drawing.
+# RPC_E_CALL_REJECTED / RPC_E_SERVERCALL_RETRYLATER mean "not now", not "failed".
+BUSY_HRESULTS = (-2147418111, -2147417846)
+
+
 def retry_busy(action, timeout=3):
     deadline = time.monotonic() + timeout
     while True:
         try:
             return action()
         except Exception as exc:
-            if getattr(exc, 'hresult', None) not in (-2147418111, -2147417846) or time.monotonic() >= deadline:
+            if getattr(exc, 'hresult', None) not in BUSY_HRESULTS or time.monotonic() >= deadline:
                 raise
             time.sleep(0.1)
 
@@ -100,25 +162,68 @@ def retry_document_read(action, timeout=3):
         try:
             return action()
         except Exception as exc:
-            transient = getattr(exc, 'hresult', None) in (-2147418111, -2147417846)
+            transient = getattr(exc, 'hresult', None) in BUSY_HRESULTS
             if isinstance(exc, AttributeError):
                 transient = any(str(exc).endswith('.' + name) for name in
                                 ('ActiveDocument', 'Name', 'FullName', 'ModelSpace', 'Count', 'Item', 'HWND', 'ListArx', 'Version',
                                  'HandleToObject', 'Handle', 'ObjectName', 'ObjectID', 'GetBoundingBox', 'GetVariable',
+                                 'SendCommand', 'PostCommand', 'ZoomWindow', 'ZoomExtents',
                                  'Documents', 'Add', 'Open', 'Save', 'SaveAs', 'Close', 'Saved', 'ReadOnly'))
             if not transient or time.monotonic() >= deadline:
                 raise
             time.sleep(0.1)
 
 
-def com_method(factory, name):
-    return retry_document_read(lambda: getattr(factory(), name))
+def com_method(factory, name, timeout=3):
+    return retry_document_read(lambda: getattr(factory(), name), timeout=timeout)
 
 
 def invoke_document(factory, name, *args):
     # Only RPC_E_CALL_REJECTED / RETRYLATER means the server did not accept
     # this invocation. Never retry a timeout or an indeterminate result.
     return retry_busy(lambda: com_method(factory, name)(*args))
+
+
+def property_lookup(entity, name):
+    """Classify one late-bound property name without reading its value.
+
+    win32com's dynamic dispatch swallows a refused GetIDsOfNames
+    (RPC_E_CALL_REJECTED) and raises AttributeError('<unknown>.Name'), which
+    looks exactly like a property this object kind does not own. Asking
+    IDispatch directly separates the two answers.
+    """
+    try:
+        ole = entity._oleobj_
+    except Exception:
+        return 'unknown'
+    try:
+        ole.GetIDsOfNames(name)
+        return 'present'
+    except Exception as exc:
+        if getattr(exc, 'hresult', None) in BUSY_HRESULTS:
+            return 'rejected'
+        return 'absent'
+
+
+def property_read(entity, name, timeout=2.0):
+    """Read one late-bound property, retrying only a refused lookup.
+
+    A name the object kind does not own fails on the first attempt; only a
+    refusal is worth waiting for. Swallowing a refusal as "property absent" is
+    what made two readbacks of the same file disagree (a wall with HoleArea in
+    one read and without it in the next).
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return getattr(entity, name)
+        except Exception as exc:
+            transient = getattr(exc, 'hresult', None) in BUSY_HRESULTS
+            if isinstance(exc, AttributeError) and str(exc).endswith('.' + name):
+                transient = property_lookup(entity, name) == 'rejected'
+            if not transient or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
 
 
 def autocad_window_pids():
@@ -276,6 +381,11 @@ class Cad:
         self.owned_doc = None
         self.document_id = None
         self.path = None
+        # Handles whose axis is known from wall.create in this job. A saved
+        # wall's DXF 300 blob does not follow its real extent (identical before
+        # and after a native split), so only an in-job creation record can
+        # prove an axis for wall.split.
+        self.created_walls = {}
 
     def reset_job(self):
         """Forget in-memory ownership at every job boundary.
@@ -288,6 +398,7 @@ class Cad:
         self.owned_doc = None
         self.document_id = None
         self.path = None
+        self.created_walls = {}
 
     def diagnose(self):
         return retry_document_read(self._diagnose_once)
@@ -359,7 +470,7 @@ class Cad:
                     'StairHeight', 'StepNum', 'StepWidth', 'StairWidth','StairWidth2','StepTotalNum',
                     'StepNum1','StepNum2','StepHeight','Deep','SectionShapeText','HoleArea'):
             try:
-                value = retry_busy(lambda: getattr(entity, key))
+                value = property_read(entity, key)
                 if isinstance(value, (int, float, str)):
                     data[key] = value
             except Exception:
@@ -389,7 +500,9 @@ class Cad:
             require_drawing_window(self.hwnd)
             require_model_space(self.doc)
             return self.doc.SendCommand(marked)
-        retry_busy(send)
+        # AttributeError('<unknown>.SendCommand') means the dispatch lookup was
+        # rejected and the command never reached AutoCAD, so a retry is safe.
+        retry_document_read(send, timeout=20)
         stable = 0
         for _ in range(300):
             try:
@@ -408,12 +521,26 @@ class Cad:
     def frame_wall(self, args):
         # T20's own joining/search behaviour is view-dependent even with
         # OSMODE=0 and _non. Use a local view before feeding exact coordinates.
+        #
+        # app is a DumbDispatch, so every member goes through a live
+        # GetIDsOfNames. win32com's dynamic lookup swallows a rejected call
+        # (RPC_E_CALL_REJECTED, measured 2026-11-24 within milliseconds of
+        # Documents.Add) and reports it as AttributeError <unknown>.ZoomWindow
+        # instead of com_error, which is why retry_busy alone never saw it.
+        # Resolve the member again on every attempt, and only give up once
+        # AutoCAD has refused for the whole window: nothing has been sent by
+        # then, so the job failed rather than becoming uncertain.
         import pythoncom
         from win32com.client import VARIANT
         lo = [min(args['start'][i], args['end'][i])-500 for i in (0,1)] + [0]
         hi = [max(args['start'][i], args['end'][i])+500 for i in (0,1)] + [0]
-        retry_busy(lambda: self.app.ZoomWindow(VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, lo),
-                                               VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, hi)))
+        try:
+            zoom = com_method(lambda: self.app, 'ZoomWindow', timeout=FRAME_TIMEOUT)
+            retry_busy(lambda: zoom(VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, lo),
+                                    VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, hi)),
+                       timeout=FRAME_TIMEOUT)
+        except Exception as exc:
+            raise CommandNotSent(f'View framing failed before any command was sent: {exc}') from exc
 
     def _readback_application(self):
         # GetActiveObject never starts AutoCAD. Re-checking the frame HWND and
@@ -556,7 +683,7 @@ class Cad:
         args = prepare(op, args)
         # Parts whose interaction is panel/click driven live in parts.py; the
         # generic branches below only cover command-line constructs.
-        if op in ('opening.create','slab.create','column.create','stair.rect_create','annotation.text','polyline.create'):
+        if op in ('wall.split','opening.create','opening.move','slab.create','column.create','column.move','stair.rect_create','annotation.text','polyline.create'):
             from .parts import execute_part
             return execute_part(self,op,args)
         if op == 'document.new':
@@ -666,28 +793,35 @@ class Cad:
             effects = {}
             if op == 'wall.create':
                 infos = [self.describe(e) for e in new]
-                selected = select_wall(infos, args, join_tolerance)
-                entity = after[selected['handle']]
-                effects = {'additional_wall_handles': [i['handle'] for i in infos if i['handle'] != selected['handle']],
+                selected = select_wall_segments(infos, args, join_tolerance)
+                chosen = [after[item['handle']] for item in selected]
+                selected_handles = {item['handle'] for item in selected}
+                effects = {'additional_wall_handles': [i['handle'] for i in infos if i['handle'] not in selected_handles],
                            'removed_handles': sorted(set(before)-set(after))}
             elif len(new) != 1:
                 raise OutcomeUnknown(f'Expected one new {expected}, observed {len(new)}; inspect drawing')
             else:
-                entity = new[0]
+                chosen = [new[0]]
             properties = {'left_width':'LeftWidth', 'right_width':'RightWidth'} if op == 'wall.create' else (
                 {'height':'StairHeight', 'steps':'StepNum', 'step_width':'StepWidth', 'width':'StairWidth'})
-            for key, prop in properties.items():
-                if key in args:
-                    setattr(entity, prop, args[key])
-                    if not math.isclose(float(getattr(entity, prop)), args[key], abs_tol=1e-6):
-                        raise OutcomeUnknown(f'{prop} readback mismatch')
-            info = self.describe(entity)
-            return {'success': True, 'document_id': self.document_id, 'handles': [info['handle']],
-                    'entities': [info], 'effects': effects, 'validation': {'type': True,
+            for entity in chosen:
+                for key, prop in properties.items():
+                    if key in args:
+                        setattr(entity, prop, args[key])
+                        if not math.isclose(float(getattr(entity, prop)), args[key], abs_tol=1e-6):
+                            raise OutcomeUnknown(f'{prop} readback mismatch')
+            infos_out = [self.describe(entity) for entity in chosen]
+            if op == 'wall.create':
+                for info in infos_out:
+                    self.created_walls[str(info['handle']).upper()] = {
+                        'start': list(args['start']), 'end': list(args['end']),
+                        'document_id': self.document_id}
+            return {'success': True, 'document_id': self.document_id, 'handles': [info['handle'] for info in infos_out],
+                    'entities': infos_out, 'effects': effects, 'validation': {'type': True,
                     'requested_properties': 'unverified: slope/overhang COM readback unavailable' if op == 'roof.create' else True,
                     'host_association': 'not_applicable',
                     'geometry': 'unverified', 'reopen': 'unverified'}}
         except Exception as exc:
-            if isinstance(exc, OutcomeUnknown):
+            if isinstance(exc, (OutcomeUnknown, CommandNotSent)):
                 raise
             raise OutcomeUnknown(str(exc)) from exc

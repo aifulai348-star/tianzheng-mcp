@@ -39,7 +39,7 @@ class FakeDoc:
     def __init__(self, viewctr=(1000.0, 500.0, 0.0), viewsize=1000.0, cmdactive=0):
         self.posted = []
         self.vars = {'VIEWCTR': viewctr, 'VIEWSIZE': viewsize, 'CMDACTIVE': cmdactive,
-                     'OSMODE': 16383}
+                     'OSMODE': 16383, 'VTENABLE': 0}
 
     def PostCommand(self, text):
         self.posted.append(text)

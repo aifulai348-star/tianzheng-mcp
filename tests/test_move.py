@@ -137,6 +137,56 @@ class ColumnMoveTests(unittest.TestCase):
             with self.assertRaises(OutcomeUnknown):
                 parts.move_column(cad, {'document_id': 'doc', 'handle': '420', 'delta': [500.0, 0.0, 0.0]}, before)
 
+    def _col_dxf(self, dx=0.0, height=3000.0, flags=(1, 60, 0)):
+        return {
+            'type': 'TCH_COLUMN', 'handle': '420', 'layer': 'COLUMN',
+            'vertices': [(x + dx, y) for x, y in [(1750.0, 1750.0), (2250.0, 1750.0),
+                                                  (2250.0, 2250.0), (1750.0, 2250.0)]],
+            'insertion': (2000.0 + dx, 2000.0), 'height': height, 'flags': flags,
+        }
+
+    def test_column_move_rejects_missing_required_dxf_fields_before_dispatch(self):
+        cases = [
+            ('missing_height', {'height': None, 'flags': (1, 60, 0)}, 'height\\(149\\)'),
+            ('missing_flag_70', {'height': 3000.0, 'flags': (None, 60, 0)}, 'flag\\(70\\)'),
+            ('missing_flag_71', {'height': 3000.0, 'flags': (1, None, 0)}, 'flag\\(71\\)'),
+            ('missing_flag_72', {'height': 3000.0, 'flags': (1, 60, None)}, 'flag\\(72\\)'),
+            ('all_missing_before_and_after', {'height': None, 'flags': (None, None, None)}, 'before move'),
+        ]
+        for name, overrides, pattern in cases:
+            with self.subTest(case=name):
+                before = {'420': col_entity('420')}
+                cad = FakeCad(before, before)
+                seq = [self._col_dxf(0.0, **overrides), self._col_dxf(500.0, **overrides)]
+                with patch('tz_mcp.parts.column_dxf', side_effect=lambda c, h: seq.pop(0)):
+                    with self.assertRaisesRegex(OutcomeUnknown, pattern):
+                        parts.move_column(cad, {'document_id': 'doc', 'handle': '420', 'delta': [500.0, 0.0, 0.0]}, before)
+                self.assertEqual([], cad.commands)
+
+    def test_column_move_rejects_missing_required_dxf_fields_after_dispatch(self):
+        for name, after_overrides, pattern in (
+            ('missing_height_after', {'height': None, 'flags': (1, 60, 0)}, 'after move.*height\\(149\\)'),
+            ('missing_flag_72_after', {'height': 3000.0, 'flags': (1, 60, None)}, 'after move.*flag\\(72\\)'),
+        ):
+            with self.subTest(case=name):
+                before = {'420': col_entity('420')}
+                cad = FakeCad(before, before)
+                seq = [self._col_dxf(0.0), self._col_dxf(500.0, **after_overrides)]
+                with patch('tz_mcp.parts.column_dxf', side_effect=lambda c, h: seq.pop(0)):
+                    with self.assertRaisesRegex(OutcomeUnknown, pattern):
+                        parts.move_column(cad, {'document_id': 'doc', 'handle': '420', 'delta': [500.0, 0.0, 0.0]}, before)
+                self.assertEqual(1, len(cad.commands))
+
+    def test_column_move_accepts_zero_flag_72_value(self):
+        before = {'420': col_entity('420')}
+        cad = FakeCad(before, before)
+        seq = [self._col_dxf(0.0, height=3000.0, flags=(1, 60, 0)),
+               self._col_dxf(500.0, height=3000.0, flags=(1, 60, 0))]
+        with patch('tz_mcp.parts.column_dxf', side_effect=lambda c, h: seq.pop(0)):
+            res = parts.move_column(cad, {'document_id': 'doc', 'handle': '420', 'delta': [500.0, 0.0, 0.0]}, before)
+        self.assertTrue(res['success'])
+        self.assertEqual([1, 60, 0], res['evidence']['move']['flags'])
+
 
 class OpeningMoveTests(unittest.TestCase):
     def _dxf(self, x=1500.0, y=0.0):

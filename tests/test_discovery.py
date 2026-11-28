@@ -13,7 +13,7 @@ from tz_mcp.commands import MAX_LIST_LIMIT, prepare
 from tz_mcp.engine import NO_ESCAPE_STEPS, Engine
 from tz_mcp.store import Store
 
-PATH = 'C:\\CAD绘图\\job-a.dwg'
+PATH = 'C:\\CADWorkspace\\job-a.dwg'
 
 
 def write_dwg(path, payload=b'AC1032'):
@@ -174,7 +174,7 @@ class ListArgumentTests(unittest.TestCase):
     def test_path_and_schema_rejections(self):
         with self.assertRaises(ValueError):
             prepare('document.list', {})
-        for path in ('', '   ', 'relative.dwg', 'C:\\CAD绘图\\job-a.dxf', 5, None):
+        for path in ('', '   ', 'relative.dwg', 'C:\\CADWorkspace\\job-a.dxf', 5, None):
             with self.assertRaises(ValueError):
                 prepare('document.list', {'path': path})
         with self.assertRaises(ValueError):

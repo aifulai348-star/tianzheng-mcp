@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tianzheng-local-mcp"
-version = "1.0.0"
-description = "AutoCAD 2024 / T20 V9 command queue with context and ESC watchdog"
+version = "1.0.1"
+description = "Queue-backed MCP server and CLI for AutoCAD 2024 + Tianzheng T20 V9 (71 capabilities)"
 requires-python = ">=3.12"
 dependencies = ["pywin32>=306; sys_platform == 'win32'", "mcp>=1.20,<2"]
 

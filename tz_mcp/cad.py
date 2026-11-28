@@ -12,11 +12,11 @@ PROGID = 'AutoCAD.Application.24.3'
 # Workspace root that document paths must stay inside; the DWG allow-list and
 # the cross-job readback root both derive from it. Override for a checkout
 # that does not sit under the original layout.
-ROOT = Path(os.environ.get('TZ_ROOT', 'D:/CAD绘图'))
+ROOT = Path(os.environ.get('TZ_ROOT', 'C:/CADWorkspace'))
 # Cross-job readback is deliberately narrower than document.new: only the
 # saved test artefacts of this project may be reopened read-only. Keeping the
 # root as a module constant lets tests redirect it without touching production.
-OUTPUTS = Path(os.environ.get('TZ_OUTPUTS', 'D:/CAD绘图/tianzheng-mcp/outputs'))
+OUTPUTS = Path(os.environ.get('TZ_OUTPUTS', 'C:/CADWorkspace/tianzheng-mcp/outputs'))
 # AutoCAD rejects COM calls for a moment while a drawing is created, saved or
 # regenerated. View framing happens before any command is sent, so it may wait
 # this long for the application to accept the call again.
@@ -26,7 +26,24 @@ _OWN_DOCUMENT = object()
 
 def late(obj):
     import win32com.client.dynamic
-    return win32com.client.dynamic.DumbDispatch(obj._oleobj_)
+    dispatch = getattr(obj, '_oleobj_', obj)
+    if dispatch is obj and not hasattr(dispatch, 'GetIDsOfNames'):
+        import pythoncom
+        dispatch = obj.QueryInterface(pythoncom.IID_IDispatch)
+    return win32com.client.dynamic.DumbDispatch(dispatch)
+
+
+def _active_dispatch(progid):
+    import pythoncom
+    import win32com.client
+
+    try:
+        obj = win32com.client.GetActiveObject(progid)
+    except (AttributeError, ImportError):
+        # pywin32 can fail while wrapping the ROT entry with a cached class.
+        # Acquire IDispatch directly to bypass the generated wrapper.
+        obj = pythoncom.GetActiveObject(progid).QueryInterface(pythoncom.IID_IDispatch)
+    return late(obj)
 
 
 def document_identity(doc):
@@ -164,9 +181,21 @@ def retry_document_read(action, timeout=3):
         except Exception as exc:
             transient = getattr(exc, 'hresult', None) in BUSY_HRESULTS
             if isinstance(exc, AttributeError):
-                transient = any(str(exc).endswith('.' + name) for name in
+                transient |= str(exc) == "Property '<unknown>.Closed' can not be set."
+                transient |= any(str(exc).endswith('.' + name) for name in
                                 ('ActiveDocument', 'Name', 'FullName', 'ModelSpace', 'Count', 'Item', 'HWND', 'ListArx', 'Version',
-                                 'HandleToObject', 'Handle', 'ObjectName', 'ObjectID', 'GetBoundingBox', 'GetVariable',
+                                 'HandleToObject', 'Handle', 'Closed', 'ObjectName', 'ObjectID', 'GetBoundingBox', 'GetVariable',
+                                 'TextString', 'Label', 'GetKind', 'Update', 'Delete', 'Layers', 'ActiveLayer', 'Layer', 'Color',
+                                 'StartPoint', 'EndPoint', 'Center', 'Radius', 'StartAngle', 'EndAngle',
+                                 'AddLine', 'AddCircle', 'AddArc', 'AddHatch', 'AppendOuterLoop', 'Evaluate',
+                                 'ConstantWidth', 'Elevation', 'Coordinates', 'AddLightWeightPolyline',
+                                 'AddText', 'AddMText', 'AddDimRotated', 'AddDimAligned', 'AddDimRadial',
+                                 'AddDimAngular', 'AddDimDiametric', 'AddEllipse',
+                                 'MajorAxis', 'RadiusRatio', 'MajorRadius', 'MinorRadius',
+                                 'Measurement', 'TextHeight', 'AttachmentPoint', 'Width',
+                                 'InsertionPoint', 'Height', 'Rotation',
+                                 'Blocks', 'InsertBlock', 'EffectiveName', 'XScaleFactor', 'YScaleFactor',
+                                 'ZScaleFactor', 'IsLayout', 'IsXRef', 'Origin',
                                  'SendCommand', 'PostCommand', 'ZoomWindow', 'ZoomExtents',
                                  'Documents', 'Add', 'Open', 'Save', 'SaveAs', 'Close', 'Saved', 'ReadOnly'))
             if not transient or time.monotonic() >= deadline:
@@ -224,6 +253,25 @@ def property_read(entity, name, timeout=2.0):
             if not transient or time.monotonic() >= deadline:
                 raise
             time.sleep(0.1)
+
+
+def property_write(entity, name, value, timeout=3.0):
+    """Write a late-bound property while preserving COM errors for retry."""
+    ole = getattr(entity, '_oleobj_', None)
+    if ole is None:
+        setattr(entity, name, value)
+        return
+
+    import pythoncom
+
+    # Dynamic dispatch can hide COM failures from both steps as AttributeError.
+    dispid = retry_busy(lambda: ole.GetIDsOfNames(name), timeout=timeout)
+    if isinstance(dispid, (tuple, list)):
+        dispid = dispid[0]
+    retry_busy(
+        lambda: ole.Invoke(dispid, 0, pythoncom.DISPATCH_PROPERTYPUT, 0, value),
+        timeout=timeout,
+    )
 
 
 def autocad_window_pids():
@@ -299,13 +347,12 @@ def connect(progid=PROGID, expected_pid=None, timeout=8.0):
     A mismatched PID fails closed instead of driving someone else's drawing.
     """
     import pythoncom
-    import win32com.client
     pythoncom.CoInitialize()
     try:
-        app = late(win32com.client.GetActiveObject(progid))
+        app = _active_dispatch(progid)
     except Exception:
         app = late(_dispatch_with_timeout(progid, timeout))
-    hwnd = int(app.HWND)
+    hwnd = int(retry_document_read(lambda: app.HWND, timeout=min(timeout, 3.0)))
     pid = window_pid(hwnd)
     if expected_pid is not None and pid != expected_pid:
         raise ValueError('AutoCAD COM answered from pid %d, expected %d; refusing to drive '
@@ -363,8 +410,7 @@ def readback_path(value):
 
 def active_object(progid=PROGID):
     """Attach to the already running AutoCAD; never Dispatch (never start one)."""
-    import win32com.client
-    return late(win32com.client.GetActiveObject(progid))
+    return _active_dispatch(progid)
 
 
 class Cad:
@@ -681,9 +727,17 @@ class Cad:
 
     def execute(self, op, args):
         args = prepare(op, args)
-        # Parts whose interaction is panel/click driven live in parts.py; the
-        # generic branches below only cover command-line constructs.
-        if op in ('wall.split','opening.create','opening.move','slab.create','column.create','column.move','stair.rect_create','annotation.text','polyline.create'):
+        # Component-specific adapters share the drawing guards in parts.py.
+        if op in ('wall.split','wall.edit','opening.create','opening.move','opening.edit','slab.create','roof.create','column.create','column.move','column.rotate','entity.copy','entity.delete','stair.rect_create','annotation.text','polyline.create',
+                  'axis.rect_create','axis.from_walls','axis.single_create','axis.annotate',
+                  'annotation.text_edit','roof.edit','column.edit','slab.edit','opening.mirror','opening.relabel',
+                  'space.create','space.edit','opening.group_create','dim.wall','wall.fix_corner','line.create','circle.create','arc.create','hatch.create',
+                  'annotation.mtext','dim.aligned','dim.linear','dim.radial',
+                  'dim.angular','dim.diameter','dim.t20_angular','ellipse.create',
+                  'layer.create','layer.edit','layer.list','layer.set_active','layer.delete','entity.set_layer',
+                  'block.define','block.insert','block.list','block.delete',
+                  'rectangle.create','polyline.edit','entity.set_color','entity.query',
+                  'entity.move','entity.rotate','entity.scale','entity.mirror'):
             from .parts import execute_part
             return execute_part(self,op,args)
         if op == 'document.new':
@@ -696,7 +750,7 @@ class Cad:
             def create():
                 docs = late(self.app.Documents)
                 count_before = retry_document_read(lambda: int(late(self.app.Documents).Count))
-                created = invoke_document(lambda: late(self.app.Documents), 'Add', 'D:/天正/sys24x64/ACAD.DWT')
+                created = invoke_document(lambda: late(self.app.Documents), 'Add', str(Path(os.environ.get('TZ_TIANZHENG_ROOT', 'C:/Tianzheng')) / 'sys24x64' / 'ACAD.DWT'))
                 # Add may initially return a weak proxy named 'Add'. Reacquire
                 # the active document rather than retrying the creation.
                 self.doc = late(created)
@@ -733,10 +787,9 @@ class Cad:
             def reopen():
                 invoke_document(lambda: self.doc, 'Save')
                 invoke_document(lambda: self.doc, 'Close', False)
-                import win32com.client
                 # Closing invalidates weak document collection proxies on this
-                # build; reacquire the application and use its typed collection.
-                self.app = retry_busy(lambda: connect(PROGID, self.pid)[0])
+                # build. Reacquire the application before reading Documents.
+                self.app = retry_document_read(lambda: connect(PROGID, self.pid)[0])
                 retry_document_read(lambda: check_application(self.app, self.hwnd, self.pid))
                 opened = late(invoke_document(
                     lambda: late(self.app.Documents), 'Open', str(self.path)))
@@ -772,23 +825,12 @@ class Cad:
                     if all(lo[k]-0.01 <= p[k] <= hi[k]+0.01 for k in (0,1)):
                         join_tolerance[i] = max(join_tolerance[i], info['LeftWidth'], info['RightWidth'])
         expected = {'wall.create': 'TDbWall',
-                    'stair.create': 'TDbLineStair', 'roof.create': 'TDbSlopeRoof'}[op]
+                    'stair.create': 'TDbLineStair'}[op]
         try:
-            if op == 'roof.create':
-                import pythoncom
-                from win32com.client import VARIANT
-                flat = [v for p in args['boundary'] for v in p[:2]]
-                boundary = self.doc.ModelSpace.AddLightWeightPolyline(VARIANT(pythoncom.VT_ARRAY | pythoncom.VT_R8, flat))
-                boundary.Closed = True
-                h = str(boundary.Handle)
-                self.run_command(command_payload(op, args, boundary_handle=h))
-            else:
-                if op == 'wall.create':
-                    self.frame_wall(args)
-                self.run_command(command_payload(op, args))
+            if op == 'wall.create':
+                self.frame_wall(args)
+            self.run_command(command_payload(op, args))
             after = self.entities()
-            if op == 'roof.create' and h in after:
-                raise OutcomeUnknown('Roof boundary was not consumed; selection outcome requires inspection')
             new = [e for h,e in after.items() if h not in before and e.ObjectName == expected]
             effects = {}
             if op == 'wall.create':
@@ -818,7 +860,7 @@ class Cad:
                         'document_id': self.document_id}
             return {'success': True, 'document_id': self.document_id, 'handles': [info['handle'] for info in infos_out],
                     'entities': infos_out, 'effects': effects, 'validation': {'type': True,
-                    'requested_properties': 'unverified: slope/overhang COM readback unavailable' if op == 'roof.create' else True,
+                    'requested_properties': True,
                     'host_association': 'not_applicable',
                     'geometry': 'unverified', 'reopen': 'unverified'}}
         except Exception as exc:

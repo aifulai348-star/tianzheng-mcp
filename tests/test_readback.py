@@ -2,7 +2,7 @@
 
 All COM objects here are local fakes.  Nothing in this file starts AutoCAD or
 touches the production queue/outputs; paths are redirected to a temp dir that
-looks like D:/CAD绘图/tianzheng-mcp/outputs.
+looks like C:/CADWorkspace/tianzheng-mcp/outputs.
 """
 import sys
 import tempfile
@@ -235,7 +235,7 @@ class SubmissionTests(unittest.TestCase):
             self.submit('document.close', {'path': 'D:/x.dwg'})
 
     def test_readback_requires_absolute_shape_and_hex_handles(self):
-        good = {'path': 'D:/CAD绘图/tianzheng-mcp/outputs/a.dwg', 'handles': ['A1', 'b2']}
+        good = {'path': 'C:/CADWorkspace/tianzheng-mcp/outputs/a.dwg', 'handles': ['A1', 'b2']}
         self.assertEqual(good, prepare('document.readback', good))
         for bad in ({'handles': ['A1']},
                     {'path': good['path']},
@@ -245,7 +245,7 @@ class SubmissionTests(unittest.TestCase):
                     {'path': good['path'], 'handles': [1]},
                     {'path': '', 'handles': ['A1']},
                     {'path': 'relative/a.dwg', 'handles': ['A1']},
-                    {'path': 'D:/CAD绘图/tianzheng-mcp/outputs/a.txt', 'handles': ['A1']},
+                    {'path': 'C:/CADWorkspace/tianzheng-mcp/outputs/a.txt', 'handles': ['A1']},
                     {'path': good['path'], 'handles': ['A1'], 'extra': True}):
             with self.assertRaises(ValueError):
                 prepare('document.readback', bad)
@@ -253,7 +253,7 @@ class SubmissionTests(unittest.TestCase):
                 self.submit('document.readback', bad)
 
     def test_readback_has_a_reasonable_handle_upper_limit(self):
-        path = 'D:/CAD绘图/tianzheng-mcp/outputs/a.dwg'
+        path = 'C:/CADWorkspace/tianzheng-mcp/outputs/a.dwg'
         self.store.submit({'steps': [{'id': 'ok', 'op': 'document.readback',
                                       'args': {'path': path,
                                                'handles': [format(i, 'X') for i in range(1, 101)]}}]})
@@ -270,7 +270,7 @@ class SubmissionTests(unittest.TestCase):
 
     def test_old_recipe_with_same_job_reopen_and_get_still_validates(self):
         recipe = {'steps': [
-            {'id': 'doc', 'op': 'document.new', 'args': {'path': 'D:/CAD绘图/x.dwg'}, 'bind': 'doc'},
+            {'id': 'doc', 'op': 'document.new', 'args': {'path': 'C:/CADWorkspace/x.dwg'}, 'bind': 'doc'},
             {'id': 'save', 'op': 'document.save', 'args': {}},
             {'id': 'reopen', 'op': 'document.reopen', 'args': {}},
             {'id': 'get', 'op': 'entity.get', 'args': {'handle': 'A1',
@@ -603,10 +603,10 @@ class ResidentWorkerIsolationTests(unittest.TestCase):
     def test_same_resident_engine_resets_ownership_between_jobs(self):
         self.store.submit({'steps': [
             {'id': 'new', 'op': 'document.new',
-             'args': {'path': 'D:/CAD绘图/tianzheng-mcp/outputs/a.dwg'}, 'bind': 'doc'}]})
+             'args': {'path': 'C:/CADWorkspace/tianzheng-mcp/outputs/a.dwg'}, 'bind': 'doc'}]})
         self.store.submit({'steps': [
             {'id': 'read', 'op': 'document.readback',
-             'args': {'path': 'D:/CAD绘图/tianzheng-mcp/outputs/a.dwg', 'handles': ['A1']}}]})
+             'args': {'path': 'C:/CADWorkspace/tianzheng-mcp/outputs/a.dwg', 'handles': ['A1']}}]})
         adapter = self.Adapter()
         engine = Engine(self.store, adapter, FakeRecovery())
         self.assertTrue(engine.run_one())
@@ -617,7 +617,7 @@ class ResidentWorkerIsolationTests(unittest.TestCase):
         self.assertIsNone(self.store.claim())
 
     def test_job_a_saves_and_explicitly_closes_then_job_b_reads_saved_path(self):
-        path = 'D:/CAD绘图/tianzheng-mcp/outputs/a.dwg'
+        path = 'C:/CADWorkspace/tianzheng-mcp/outputs/a.dwg'
         first = self.store.submit({'steps': [
             {'id': 'new', 'op': 'document.new', 'args': {'path': path}, 'bind': 'doc'},
             {'id': 'save', 'op': 'document.save', 'args': {}},
@@ -644,7 +644,7 @@ class ResidentWorkerIsolationTests(unittest.TestCase):
     def test_same_job_reopen_and_get_still_works(self):
         job = self.store.submit({'steps': [
             {'id': 'new', 'op': 'document.new',
-             'args': {'path': 'D:/CAD绘图/tianzheng-mcp/outputs/a.dwg'}, 'bind': 'doc'},
+             'args': {'path': 'C:/CADWorkspace/tianzheng-mcp/outputs/a.dwg'}, 'bind': 'doc'},
             {'id': 'save', 'op': 'document.save', 'args': {}},
             {'id': 'reopen', 'op': 'document.reopen', 'args': {}},
             {'id': 'get', 'op': 'entity.get',
@@ -687,7 +687,7 @@ class NoEscapeWatchdogTests(unittest.TestCase):
 
     def test_readback_timeout_is_unknown_without_escape(self):
         self.run_timeout('document.readback',
-                         {'path': 'D:/CAD绘图/tianzheng-mcp/outputs/a.dwg',
+                         {'path': 'C:/CADWorkspace/tianzheng-mcp/outputs/a.dwg',
                           'handles': ['A1']})
 
     def test_close_timeout_is_unknown_without_escape(self):

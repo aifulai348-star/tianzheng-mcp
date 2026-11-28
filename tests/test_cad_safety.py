@@ -1,7 +1,117 @@
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, PropertyMock, call, patch
 from pathlib import Path
+from tz_mcp import cad as cad_module
 from tz_mcp.cad import Cad, CommandNotSent, OutcomeUnknown, guarded_mutation, retry_busy, retry_document_read, com_method, invoke_document, property_lookup, property_read, check_application, require_drawing_window, select_wall, select_wall_segments, require_model_space
+
+
+class CadConnectionSafetyTests(unittest.TestCase):
+    def test_connect_retries_transient_hwnd_read(self):
+        class App:
+            HWND = PropertyMock(side_effect=[AttributeError('<unknown>.HWND'), 100])
+
+        app = App()
+        with patch('pythoncom.CoInitialize'), \
+             patch('win32com.client.GetActiveObject', return_value=app) as active, \
+             patch('tz_mcp.cad.late', return_value=app), \
+             patch('tz_mcp.cad.window_pid', return_value=7) as window_pid, \
+             patch('tz_mcp.cad.time.sleep') as sleep:
+            self.assertEqual((app, 100, 7), cad_module.connect('P', expected_pid=7))
+
+        active.assert_called_once_with('P')
+        self.assertEqual(2, App.__dict__['HWND'].call_count)
+        window_pid.assert_called_once_with(100)
+        sleep.assert_called_once()
+
+    def test_connect_rejects_pid_mismatch_immediately(self):
+        app = SimpleNamespace(HWND=100)
+        with patch('pythoncom.CoInitialize'), \
+             patch('win32com.client.GetActiveObject', return_value=app) as active, \
+             patch('tz_mcp.cad.late', return_value=app), \
+             patch('tz_mcp.cad.window_pid', return_value=8) as window_pid, \
+             patch('win32com.client.Dispatch') as dispatch, \
+             patch('tz_mcp.cad.time.sleep') as sleep:
+            with self.assertRaisesRegex(ValueError, 'pid 8, expected 7'):
+                cad_module.connect('P', expected_pid=7)
+
+        active.assert_called_once_with('P')
+        window_pid.assert_called_once_with(100)
+        dispatch.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_active_lookup_bypasses_corrupt_generated_wrapper(self):
+        import pythoncom
+
+        app = SimpleNamespace(HWND=100)
+        for attach in (cad_module.connect, cad_module.active_object):
+            with self.subTest(attach=attach.__name__):
+                raw_dispatch = SimpleNamespace(GetIDsOfNames=Mock())
+                unknown = SimpleNamespace(QueryInterface=Mock(return_value=raw_dispatch))
+                error = AttributeError(
+                    "module 'win32com.gen_py.AutoCAD' has no attribute 'CLSIDToPackageMap'"
+                )
+                with patch('pythoncom.CoInitialize'), \
+                     patch('win32com.client.GetActiveObject', side_effect=error), \
+                     patch('pythoncom.GetActiveObject', return_value=unknown) as raw_active, \
+                     patch('win32com.client.dynamic.DumbDispatch', return_value=app) as wrap, \
+                     patch('tz_mcp.cad.window_pid', return_value=7), \
+                     patch('win32com.client.Dispatch') as dispatch:
+                    if attach is cad_module.connect:
+                        self.assertEqual((app, 100, 7), attach('P', expected_pid=7))
+                    else:
+                        self.assertIs(app, attach('P'))
+
+                raw_active.assert_called_once_with('P')
+                unknown.QueryInterface.assert_called_once_with(pythoncom.IID_IDispatch)
+                wrap.assert_called_once_with(raw_dispatch)
+                dispatch.assert_not_called()
+
+    def test_late_wraps_existing_dispatch_and_queries_unknown_interface(self):
+        import pythoncom
+
+        raw_dispatch = SimpleNamespace(GetIDsOfNames=Mock())
+        unknown = SimpleNamespace(QueryInterface=Mock(return_value=raw_dispatch))
+        wrapper = SimpleNamespace(_oleobj_=raw_dispatch)
+        with patch('win32com.client.dynamic.DumbDispatch') as wrap:
+            for obj in (wrapper, raw_dispatch, unknown):
+                with self.subTest(obj=obj):
+                    wrap.reset_mock()
+                    self.assertIs(wrap.return_value, cad_module.late(obj))
+                    wrap.assert_called_once_with(raw_dispatch)
+
+        unknown.QueryInterface.assert_called_once_with(pythoncom.IID_IDispatch)
+
+    def test_document_reopen_retries_reconnect_after_close(self):
+        events = Mock()
+        reopened = object()
+        events.Open.return_value = reopened
+        session = Cad.__new__(Cad)
+        session.doc = session.owned_doc = SimpleNamespace(Save=events.Save, Close=events.Close)
+        session.path = Path('test.dwg')
+        session.document_id = 'doc'
+        session.hwnd, session.pid = 100, 7
+        session.guard = Mock()
+        session.entities = Mock(return_value={})
+        app = SimpleNamespace(HWND=100, Documents=SimpleNamespace(Open=events.Open))
+        events.connect.side_effect = [AttributeError('<unknown>.HWND'), (app, 100, 7)]
+
+        with patch('tz_mcp.cad.connect', events.connect), \
+             patch('tz_mcp.cad.late', side_effect=lambda obj: obj), \
+             patch('tz_mcp.cad.check_application') as check, \
+             patch('tz_mcp.cad.time.sleep') as sleep:
+            result = session.execute('document.reopen', {})
+
+        self.assertEqual({'path': 'test.dwg', 'document_id': 'doc', 'entities': []}, result)
+        self.assertEqual([
+            call.Save(), call.Close(False), call.connect(cad_module.PROGID, 7),
+            call.connect(cad_module.PROGID, 7), call.Open('test.dwg'),
+        ], events.mock_calls)
+        check.assert_called_once_with(app, 100, 7)
+        sleep.assert_called_once()
+        self.assertIs(app, session.app)
+        self.assertIs(reopened, session.doc)
+        self.assertIs(reopened, session.owned_doc)
 
 
 class CadSafetyTests(unittest.TestCase):
@@ -158,7 +268,7 @@ class CadSafetyTests(unittest.TestCase):
         self.assertEqual('resolved',cad.entity('35A','doc'))
     def test_guard_waits_for_getvariable_metadata_after_reopen(self):
         class Doc:
-            FullName = 'D:/CAD绘图/tianzheng-mcp/outputs/test.dwg'
+            FullName = 'C:/CADWorkspace/tianzheng-mcp/outputs/test.dwg'
             reads = 0
             @property
             def GetVariable(self):
@@ -237,7 +347,7 @@ class CadSafetyTests(unittest.TestCase):
             retry_document_read(lambda: (_ for _ in ()).throw(AttributeError('<unknown>.Typo')))
     def test_guard_rebinds_document_after_reopen_and_checks_full_path(self):
         class Doc:
-            FullName = 'D:/CAD绘图/tianzheng-mcp/outputs/test.dwg'
+            FullName = 'C:/CADWorkspace/tianzheng-mcp/outputs/test.dwg'
             def GetVariable(self, name):
                 return {'CMDACTIVE':0,'UCSORG':(0,0,0),'UCSXDIR':(1,0,0),'UCSYDIR':(0,1,0)}[name]
         cad = Cad.__new__(Cad)
@@ -249,10 +359,10 @@ class CadSafetyTests(unittest.TestCase):
         self.assertIs(new_doc, cad.doc)
     def test_guard_rejects_other_active_drawing_before_rebinding(self):
         class Doc:
-            FullName = 'D:/CAD绘图/user-source.dwg'
+            FullName = 'C:/CADWorkspace/user-source.dwg'
         cad = Cad.__new__(Cad)
         old = cad.doc = object()
-        cad.path = Path('D:/CAD绘图/tianzheng-mcp/outputs/test.dwg')
+        cad.path = Path('C:/CADWorkspace/tianzheng-mcp/outputs/test.dwg')
         cad._current_document = lambda: Doc()
         with self.assertRaises(ValueError):
             cad.guard()

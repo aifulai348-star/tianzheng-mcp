@@ -2,11 +2,17 @@ import threading
 import time
 from .context import resolve
 
-# Read-only discovery/readback and explicit close have no foreground CAD
-# command, so ESC cannot recover them and may cancel a modal in an older
-# drawing. Timeout/modal still means unknown; the drawing-command watchdog
-# below is unchanged.
-NO_ESCAPE_STEPS = {'document.readback', 'document.list', 'document.close'}
+# These operations have no interactive CAD command to cancel. ESC may cancel
+# a modal in an older drawing, so a timeout or modal leaves the outcome unknown.
+NO_ESCAPE_STEPS = {'document.readback', 'document.list', 'document.close',
+                   'wall.edit', 'opening.edit', 'opening.relabel', 'space.edit', 'entity.delete',
+                   'annotation.text_edit', 'roof.edit', 'column.edit', 'slab.edit',
+                   'annotation.mtext', 'dim.aligned', 'dim.linear', 'dim.radial',
+                   'dim.angular', 'dim.diameter', 'ellipse.create',
+                   'line.create', 'circle.create', 'arc.create', 'layer.create', 'entity.set_layer',
+                   'layer.list', 'layer.edit', 'layer.delete', 'hatch.create',
+                   'rectangle.create', 'polyline.edit', 'entity.set_color', 'layer.set_active',
+                   'entity.query', 'block.define', 'block.insert', 'block.list', 'block.delete'}
 
 
 class Engine:

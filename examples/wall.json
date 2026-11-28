@@ -1,7 +1,7 @@
 {
   "operation_id": "wall-smoke-001",
   "steps": [
-    {"id": "drawing", "op": "document.new", "args": {"path": "<repo>/outputs/wall-smoke-001.dwg"}, "timeout_s": 45},
+    {"id": "drawing", "op": "document.new", "args": {"path": "C:/CADWorkspace/tianzheng-mcp/outputs/wall-smoke-001.dwg"}, "timeout_s": 45},
     {"id": "wall_a", "op": "wall.create", "args": {"start": [0,0], "end": [4000,0], "left_width": 120, "right_width": 120}, "bind": "wall", "timeout_s": 15},
     {"id": "inspect", "op": "entity.get", "args": {"handle": {"$ref": "wall.handles.0"}, "document_id": {"$ref": "wall.document_id"}}, "bind": "wall_info"},
     {"id": "save", "op": "document.save", "args": {}},

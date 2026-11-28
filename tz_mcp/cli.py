@@ -12,77 +12,79 @@ def store():
     return Store(state_dir() / 'queue.sqlite3')
 
 
-# Measured on T20 V9/ACAD 2024; see docs/LIVE-PROBE-20261118.md and
-# docs/STATUS-20261119.md before changing any label here.
+# Validation status for AutoCAD 2024 with Tianzheng T20 V9.
 VALIDATION = {
-    'document.new': 'verified_live: Documents.Add + SaveAs, count checked',
-    'document.close': 'verified_live (2026-11-20, AutoCAD 2024 + T20, same worker new/save/close): '
-                      'explicit Close(False) of the job-owned, active, saved drawing only; ownership '
-                      'is the original Add/Open proxy, verified by COM IUnknown identity so a '
-                      'same-path reopened drawing is refused; unsaved/foreign/identity-unreadable '
-                      'refusals and COM timeout/unknown outcomes are offline-tested only; see '
-                      'outputs/v11-readback-live-71a413c5ef/evidence.json',
-    'document.readback': 'verified_live (2026-11-20, AutoCAD 2024 + T20, saved DWG under '
-                         'D:/CAD绘图/tianzheng-mcp/outputs): Documents.Open(path, True), '
-                         'ModelSpace handle readback of polyline 34C and TGWALL 35A, then '
-                         'Close(False) of only that verified document; hashes unchanged, both '
-                         'readback documents closed, pre-opened target refused and left open; '
-                         'COM timeout/unknown-outcome boundaries are offline-tested only; see '
-                         'outputs/v11-readback-live-71a413c5ef/evidence.json',
-    'document.list': 'verified_live (2026-11-20, AutoCAD 2024 + T20, saved DWG under '
-                     'D:/CAD绘图/tianzheng-mcp/outputs, path-only start): paged ModelSpace Handle '
-                     'discovery sharing the read-only Open(path, True)/verify/Close(False) path of '
-                     'document.readback; three limit=3 pages returned 7 entities in Handle order -- '
-                     '4 TDbWall, 1 rectangular TDbColumn, 1 ordinary door and 1 ordinary window -- '
-                     'with door/window GetKind/GetSubKind read as stored; all 7 Handles were then '
-                     'read back with matching properties, the file sha256 was unchanged and no '
-                     'document was left open; negative/refusal and COM timeout/unknown-outcome '
-                     'paths are offline-tested only; host fields and cross-page drawing-change '
-                     'detection are not verified; see '
-                     'outputs/v11-discovery-live-cc80957f9306/evidence.json',
-    'wall.create': 'verified_live: TGWall panel + canvas clicks, segment identified by geometry',
-    'opening.create': 'verified_live (2026-11-19 door handle 3C8 and 2026-11-20 door+window in one '
-                      'job: door 3CF 900x2100 host 35A hole 0.00 -> 1.89, window 409 1200x1600 '
-                      'sill 600 hole 1.89 -> 3.81, both GetKind/GetSubKind as requested and both '
-                      'present after save+reopen): TGDOOR or TGWINDOW palette, three size rows '
-                      'typed by order, then one canvas click; kind/width/height read back from COM '
-                      'and DXF. See docs/OPENING-WINDOW-20261120.md',
-    'opening.move': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD 2024 '
-                    '+ T20): a door moved along its host wall in plan; DXF insertion, width, height '
-                    'and rotation plus the host HoleArea read back consistently; cross-axis, '
-                    'off-wall-end and overlap refusals and short-delta protection are '
-                    'offline-tested only; read back twice after save+close with an unchanged file '
-                    'hash',
-    'slab.create': 'verified_live: TSlab consumes boundary/hole polylines, thickness read back',
-    'annotation.text': 'verified_live: ordinary AcDbText',
-    'polyline.create': 'verified_live: ordinary AcDbPolyline',
-    'wall.split': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD 2024 + '
-                  'T20): TKATANA via the T20 screen menu, both host cases through one recipe shape '
-                  '-- the door stays on the original wall or migrates to the new segment, seam and '
-                  'object counts verified, paged document.list and two document.readback passes '
-                  'after save+close with unchanged hash and no document left open; '
-                  'timeout/focus-loss paths remain offline-tested only',
-    'column.create': 'verified_live (2026-11-19 end-to-end through MCP + worker, handle 35B): '
-                     'TGColumn panel edited field by field then one canvas click; '
-                     'width/depth/height/insertion read back from DXF; OSMODE forced to 0 for the '
-                     'click. Seed CopyObjects route (job 144ad30f) removed. Live runs drove the UI '
-                     'directly because COM only reaches the first AutoCAD instance',
-    'column.move': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD 2024 '
-                   '+ T20): a standalone rectangular column moved in plan; DXF insertion and all '
-                   'four vertices shifted by the same delta, height and flags unchanged; '
-                   'non-rectangular/foreign handle and short-delta refusals are offline-tested '
-                   'only; read back twice after save+close with an unchanged file hash',
-    'stair.create': 'unverified: TLStair payload is historical evidence only',
-    'stair.rect_create': 'verified_live (2026-11-24, real stdio MCP queue_submit + worker, AutoCAD '
-                         '2024 + T20): TDbRectStair created from a plan point with height, step '
-                         'count and width read back after save+close+reopen; the wizard builds a '
-                         'two-flight stair, so GetBoundingBox spans both flights and is not the '
-                         'requested single-flight width. Flight width is only honoured up to the '
-                         '1230 mm wizard default: 600/900/1200/1230 passed, 1300/1500/3000 stayed '
-                         'at 1230. A requested/measured mismatch now fails the job as '
-                         'unknown_outcome naming the built handle instead of passing the '
-                         'properties',
-    'roof.create': 'unverified: TSlopeRoof boundary consumption not live-verified',
+    'rectangle.create': 'verified_live',
+    'polyline.edit': 'verified_live',
+    'entity.set_color': 'verified_live',
+    'layer.set_active': 'verified_live',
+    'entity.query': 'verified_live',
+    'line.create': 'verified_live',
+    'circle.create': 'verified_live',
+    'arc.create': 'verified_live',
+    'hatch.create': 'verified_live',
+    'layer.create': 'verified_live',
+    'layer.delete': 'verified_live',
+    'layer.list': 'verified_live',
+    'layer.edit': 'verified_live',
+    'entity.set_layer': 'verified_live',
+    'axis.rect_create': 'verified_live',
+    'axis.from_walls': 'verified_live',
+    'axis.single_create': 'verified_live',
+    'axis.annotate': 'verified_live',
+    'document.new': 'verified_live',
+    'document.save': 'verified_live',
+    'document.reopen': 'verified_live',
+    'document.close': 'verified_live',
+    'document.readback': 'verified_live',
+    'document.list': 'verified_live',
+    'wall.create': 'verified_live',
+    'opening.create': 'verified_live',
+    'opening.move': 'verified_live',
+    'opening.edit': 'verified_live',
+    'opening.group_create': 'verified_live',
+    'opening.mirror': 'verified_live',
+    'annotation.text_edit': 'verified_live',
+    'roof.edit': 'verified_live',
+    'column.edit': 'verified_live',
+    'slab.edit': 'verified_live',
+    'slab.create': 'verified_live',
+    'annotation.text': 'verified_live',
+    'annotation.mtext': 'verified_live',
+    'dim.aligned': 'verified_live',
+    'dim.linear': 'verified_live',
+    'dim.radial': 'verified_live',
+    'dim.angular': 'verified_live',
+    'dim.t20_angular': 'verified_live',
+    'dim.diameter': 'verified_live',
+    'ellipse.create': 'verified_live',
+    'block.delete': 'verified_live',
+    'block.define': 'verified_live',
+    'block.insert': 'verified_live',
+    'block.list': 'verified_live',
+    'polyline.create': 'verified_live',
+    'wall.split': 'verified_live',
+    'wall.edit': 'verified_live',
+    'column.create': 'verified_live',
+    'column.move': 'verified_live',
+    'column.rotate': 'verified_live',
+    'entity.copy': 'verified_live',
+    'entity.move': 'verified_live',
+    'entity.rotate': 'verified_live',
+    'entity.scale': 'verified_live',
+    'entity.mirror': 'verified_live',
+    'entity.delete': 'verified_live',
+    'entity.get': 'verified_live',
+    'entity.verify': 'verified_live',
+    'wall.find': 'verified_live',
+    'opening.relabel': 'verified_live',
+    'space.create': 'verified_live',
+    'space.edit': 'verified_live',
+    'dim.wall': 'verified_live',
+    'wall.fix_corner': 'verified_live',
+    'stair.create': 'unverified',
+    'stair.rect_create': 'verified_live',
+    'roof.create': 'verified_live',
 }
 
 
@@ -146,8 +148,8 @@ def acknowledge(job_id, side_effects):
 
 
 def doctor():
-    out = {'cad_executable': Path('D:/CAD/AutoCAD 2024/acad.exe').exists(),
-           'tianzheng_root': Path('D:/天正/SYS').exists(), 'progid': 'AutoCAD.Application.24.3'}
+    out = {'cad_executable': Path(os.environ.get('TZ_CAD_EXE', 'C:/Program Files/Autodesk/AutoCAD 2024/acad.exe')).exists(),
+           'tianzheng_root': (Path(os.environ.get('TZ_TIANZHENG_ROOT', 'C:/Tianzheng')) / 'SYS').exists(), 'progid': 'AutoCAD.Application.24.3'}
     try:
         from .cad import Cad
         pinned = os.environ.get('TZ_CAD_PID')

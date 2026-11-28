@@ -1,3 +1,4 @@
 @echo off
 cd /d "%~dp0"
-"D:\python\python.exe" -X utf8 "%~dp0bootstrap.py" %*
+if not defined TZ_PYTHON set "TZ_PYTHON=python"
+"%TZ_PYTHON%" -X utf8 "%~dp0bootstrap.py" %*
